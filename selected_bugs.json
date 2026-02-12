@@ -1,0 +1,27 @@
+{
+  "ML": {
+    "keras": [1,7,13,20,26,33,39],
+    "spacy": [1,6],
+    "PySnooper": [1]
+  },
+  "Scientific": {
+    "pandas": [1,34,68,102,136],
+    "matplotlib": [1],
+    "tqdm": [1],
+    "youtube-dl": [1,22],
+    "luigi": [1]
+  },
+  "Web": {
+    "fastapi": [1,5,9,13],
+    "httpie": [1],
+    "sanic": [1],
+    "tornado": [1,5,9,13]
+  },
+  "DevTools": {
+    "ansible": [1,10],
+    "black": [1,12],
+    "cookiecutter": [1],
+    "scrapy": [1,21],
+    "thefuck": [1,11,22]
+  }
+}
