@@ -10,7 +10,8 @@ import time
 import tracemalloc
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from codecarbon import EmissionsTracker
+#from codecarbon import EmissionsTracker
+import pyRAPL
 from extract_block import extract_buggy_block
 import re
 
@@ -60,9 +61,9 @@ Return ONLY the corrected {block_type} code.
 ### CODE ###
 {buggy_block}
 """
-
-    tracker = EmissionsTracker(output_file="energy_log.csv")
-    tracker.start()
+    pyRAPL.setup()
+    meter = pyRAPL.Measurement("llm_inference")
+    meter.begin()
 
     tracemalloc.start()
     start = time.time()
@@ -80,17 +81,17 @@ Return ONLY the corrected {block_type} code.
     gen_only = output_ids[0][encoded["input_ids"].shape[1]:]
     raw = tokenizer.decode(gen_only, skip_special_tokens=True)
 
+    meter.end()
+
+    energy_uj = meter.result.pkg[0] if meter.result.pkg else 0.0
+    energy_joules = energy_uj / 1e6
+    emissions = 0.0
+
     duration = time.time() - start
 
     current_mem, peak_mem = tracemalloc.get_traced_memory()
     tracemalloc.stop()
 
-    emissions = tracker.stop()
-
-    try:
-        energy_kwh = tracker.final_emissions_data.energy_consumed
-    except:
-        energy_kwh = 0.0
 
     cleaned = extract_clean_code(raw)
     if not cleaned.strip():
@@ -99,4 +100,4 @@ Return ONLY the corrected {block_type} code.
     open("llm_patch_block.py", "w").write(cleaned)
 
     print("Patch generated → llm_patch_block.py")
-    print(f"LLM_RESULT duration={duration} mem={peak_mem} energy={energy_kwh} emissions={emissions}")
+    print(f"LLM_RESULT duration={duration} mem={peak_mem} energy={energy_joules} emissions={emissions}")

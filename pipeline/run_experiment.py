@@ -122,17 +122,8 @@ def run_single(domain, project, bug_id, model, run_id):
     mem_match = re.search(r"mem=([0-9]+)", out_text)
 
     duration = float(duration_match.group(1)) if duration_match else 0.0
-    energy_kwh = float(energy_match.group(1)) if energy_match else 0.0
-    baseline_file = os.path.join(ROOT, "baseline.json")
-    scaled_baseline = 0.0
-
-    if os.path.exists(baseline_file):
-        with open(baseline_file, "r") as f:
-            baseline_15sec = json.load(f)["baseline_energy_kwh"]
-
-        baseline_per_second = baseline_15sec / 15.0
-        scaled_baseline = baseline_per_second * duration
-    energy_kwh = max(0.0, energy_kwh - scaled_baseline)
+    energy_joules = float(energy_match.group(1)) if energy_match else 0.0
+    
     emissions = float(emissions_match.group(1)) if emissions_match else 0.0
     memory_bytes = int(mem_match.group(1)) if mem_match else 0
 
@@ -164,7 +155,7 @@ def run_single(domain, project, bug_id, model, run_id):
             passed,
             duration,
             memory_bytes,
-            energy_kwh,
+            energy_joules,
             emissions
         ])
     import time
@@ -190,7 +181,7 @@ def init_results():
                 "pass_at_1",
                 "duration_seconds",
                 "memory_bytes",
-                "energy_kwh",
+                "energy_joules",
                 "emissions_kg"
             ])
         print("[INIT] results.csv created with headers")
