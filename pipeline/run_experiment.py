@@ -124,6 +124,7 @@ def run_single(domain, project, bug_id, model, run_id):
     duration = float(duration_match.group(1)) if duration_match else 0.0
     energy_joules = float(energy_match.group(1)) if energy_match else 0.0
     
+    avg_power_watts = energy_joules / duration if duration > 0 else 0.0
     emissions = float(emissions_match.group(1)) if emissions_match else 0.0
     memory_bytes = int(mem_match.group(1)) if mem_match else 0
 
@@ -156,7 +157,7 @@ def run_single(domain, project, bug_id, model, run_id):
             duration,
             memory_bytes,
             energy_joules,
-            emissions
+            avg_power_watts
         ])
     import time
     time.sleep(5)
@@ -182,7 +183,7 @@ def init_results():
                 "duration_seconds",
                 "memory_bytes",
                 "energy_joules",
-                "emissions_kg"
+                "avg_power_watts"
             ])
         print("[INIT] results.csv created with headers")
 
