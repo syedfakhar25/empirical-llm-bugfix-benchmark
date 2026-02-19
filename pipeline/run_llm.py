@@ -1,8 +1,9 @@
 # ============================================================
 # run_llm.py
-# - Removed device_map (no accelerate needed)
+# - CPU optimized
 # - Deterministic runs
-# - Proper energy logging
+# - Proper energy + power logging
+# - Thread controlled for reproducibility
 # ============================================================
 
 import os
@@ -10,26 +11,39 @@ import time
 import tracemalloc
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
-#from codecarbon import EmissionsTracker
 import pyRAPL
 from extract_block import extract_buggy_block
 import re
 
+# ------------------------------
+# Deterministic + Controlled CPU
+# ------------------------------
 torch.manual_seed(42)
+torch.set_num_threads(4)  # Control CPU usage (adjust if needed)
 
 MODEL_NAME = os.environ["MODEL_NAME"]
 BUGGY_FILE = os.environ["BUGGY_FILE"]
 PATCH_FILE = os.environ["PATCH_FILE"]
 
+# ------------------------------
+# Model Loading
+# ------------------------------
 def load_model():
     tok = AutoTokenizer.from_pretrained(MODEL_NAME)
+
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_NAME,
-        torch_dtype=torch.float32   # Explicit CPU dtype
+        dtype=torch.float32,      # Stable on CPU
+        low_cpu_mem_usage=True
     )
-    model.eval()  # Important for inference stability
+
+    model.eval()
     return tok, model
 
+
+# ------------------------------
+# Clean Generated Code
+# ------------------------------
 def extract_clean_code(text):
     text = text.replace("```python", "").replace("```", "").strip()
 
@@ -39,6 +53,10 @@ def extract_clean_code(text):
 
     return text[m.start():].strip()
 
+
+# ------------------------------
+# Main Execution
+# ------------------------------
 if __name__ == "__main__":
 
     tokenizer, model = load_model()
@@ -61,6 +79,10 @@ Return ONLY the corrected {block_type} code.
 ### CODE ###
 {buggy_block}
 """
+
+    # ------------------------------
+    # Energy Measurement Start
+    # ------------------------------
     pyRAPL.setup()
     meter = pyRAPL.Measurement("llm_inference")
     meter.begin()
@@ -68,12 +90,17 @@ Return ONLY the corrected {block_type} code.
     tracemalloc.start()
     start = time.time()
 
-    encoded = tokenizer(prompt, return_tensors="pt")
+    encoded = tokenizer(
+        prompt,
+        return_tensors="pt",
+        truncation=True,
+        max_length=2048
+    )
 
-    with torch.no_grad():  # important for inference
+    with torch.no_grad():
         output_ids = model.generate(
             **encoded,
-            max_new_tokens=300,
+            max_new_tokens=200,
             temperature=0.0,
             do_sample=False
         )
@@ -81,23 +108,40 @@ Return ONLY the corrected {block_type} code.
     gen_only = output_ids[0][encoded["input_ids"].shape[1]:]
     raw = tokenizer.decode(gen_only, skip_special_tokens=True)
 
+    # ------------------------------
+    # Energy Measurement End
+    # ------------------------------
     meter.end()
 
+    duration = time.time() - start
+
+    # Energy in microjoules → joules
     energy_uj = meter.result.pkg[0] if meter.result.pkg else 0.0
     energy_joules = energy_uj / 1e6
-    emissions = 0.0
 
-    duration = time.time() - start
+    # Compute Power (W = J / s)
+    power_watts = energy_joules / duration if duration > 0 else 0.0
 
     current_mem, peak_mem = tracemalloc.get_traced_memory()
     tracemalloc.stop()
 
-
+    # ------------------------------
+    # Clean Output
+    # ------------------------------
     cleaned = extract_clean_code(raw)
     if not cleaned.strip():
         cleaned = "# ERROR: LLM returned no valid Python code"
 
     open("llm_patch_block.py", "w").write(cleaned)
 
+    # ------------------------------
+    # Final Logging
+    # ------------------------------
     print("Patch generated → llm_patch_block.py")
-    print(f"LLM_RESULT duration={duration} mem={peak_mem} energy={energy_joules} emissions={emissions}")
+    print(
+        f"LLM_RESULT "
+        f"duration={duration:.4f}s "
+        f"mem_peak={peak_mem}bytes "
+        f"energy={energy_joules:.6f}J "
+        f"power={power_watts:.4f}W"
+    )

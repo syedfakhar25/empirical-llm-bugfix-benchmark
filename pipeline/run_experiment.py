@@ -1,5 +1,5 @@
 # ============================================================
-#For ME: ALWAYS -> cd ~/llm_debug_experiments source venv/bin/activate
+#For ME: ALWAYS ->  venv/bin/activate
 # run_experiment.py
 # - Repetition support (run_id)
 # - Robust failure logging
@@ -114,6 +114,11 @@ def run_single(domain, project, bug_id, model, run_id):
     os.environ["PATCH_FILE"] = patch_file
 
     llm_output = run_cmd(f"python3 {RUN_LLM}", cwd=eval_dir)
+
+    if llm_output.returncode != 0:
+        print("LLM crashed!")
+        print("STDERR:", llm_output.stderr)
+
     out_text = llm_output.stdout
 
     duration_match = re.search(r"duration=([0-9\.]+)", out_text)
@@ -141,6 +146,9 @@ def run_single(domain, project, bug_id, model, run_id):
             replaced = replace_block_in_file(buggy_path, block_name, fixed_block)
 
             if replaced:
+                #Run the test script in Bugs in Py
+                bug_dir = os.path.join(PROJECTS, project, "bugs", str(bug_id))
+                run_test_script = os.path.join(bug_dir, "run_test.sh")
                 result = run_cmd("bash run_test.sh", cwd=repo)
                 passed = 1 if "failed" not in result.stdout.lower() and "error" not in result.stdout.lower() else 0
 
