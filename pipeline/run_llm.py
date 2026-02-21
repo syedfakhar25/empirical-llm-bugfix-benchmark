@@ -54,6 +54,29 @@ def extract_clean_code(text):
     return text[m.start():].strip()
 
 
+def enforce_block_name(generated_code, block_type, expected_name):
+    """
+    Ensure the generated top-level def/class keeps the same target name.
+    """
+    if not generated_code.strip():
+        return generated_code
+
+    pattern = r"^(\s*)(def|class)\s+([A-Za-z0-9_]+)"
+    m = re.search(pattern, generated_code, flags=re.MULTILINE)
+    if not m:
+        return generated_code
+
+    actual_kind = m.group(2)
+    if actual_kind != block_type:
+        return generated_code
+
+    if m.group(3) == expected_name:
+        return generated_code
+
+    start, end = m.span(3)
+    return generated_code[:start] + expected_name + generated_code[end:]
+
+
 # ------------------------------
 # Main Execution
 # ------------------------------
@@ -75,6 +98,7 @@ if __name__ == "__main__":
     prompt = f"""
 Fix the following {block_type} '{block_name}'.
 Return ONLY the corrected {block_type} code.
+Keep the exact same {block_type} name: {block_name}
 
 ### CODE ###
 {buggy_block}
@@ -131,6 +155,8 @@ Return ONLY the corrected {block_type} code.
     cleaned = extract_clean_code(raw)
     if not cleaned.strip():
         cleaned = "# ERROR: LLM returned no valid Python code"
+    else:
+        cleaned = enforce_block_name(cleaned, "def" if block_type == "function" else "class", block_name)
 
     open("llm_patch_block.py", "w").write(cleaned)
 
