@@ -16,6 +16,7 @@ import re
 import argparse
 import ast
 import json
+from extract_block import extract_buggy_block
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -139,18 +140,34 @@ def run_single(domain, project, bug_id, model, run_id):
 
     if os.path.exists(patch_file_path):
         fixed_block = open(patch_file_path).read().strip()
-        match = re.search(r"(class|def)\s+([A-Za-z0-9_]+)", fixed_block)
 
-        if match:
-            block_name = match.group(2)
-            replaced = replace_block_in_file(buggy_path, block_name, fixed_block)
+        generated_match = re.search(r"(class|def)\s+([A-Za-z0-9_]+)", fixed_block)
+        with open(buggy_path, "r") as bf:
+            source_code = bf.read()
+        target_info = extract_buggy_block(source_code, patch_file)
 
-            if replaced:
-                #Run the test script in Bugs in Py
-                bug_dir = os.path.join(PROJECTS, project, "bugs", str(bug_id))
-                run_test_script = os.path.join(bug_dir, "run_test.sh")
-                result = run_cmd("bash run_test.sh", cwd=repo)
-                passed = 1 if "failed" not in result.stdout.lower() and "error" not in result.stdout.lower() else 0
+        if target_info and generated_match:
+            target_kind, block_name, _ = target_info
+
+            # If LLM changed the name, rewrite it back to target
+            kind = generated_match.group(1)
+            gen_name = generated_match.group(2)
+            if gen_name != block_name:
+                fixed_block = re.sub(
+                    rf"^({kind}\s+){re.escape(gen_name)}",
+                    rf"\1{block_name}",
+                    fixed_block,
+                    count=1,
+                    flags=re.MULTILINE,
+                )
+
+            expected_kind = "def" if target_kind == "function" else "class"
+            if kind == expected_kind:
+                replaced = replace_block_in_file(buggy_path, block_name, fixed_block)
+
+                if replaced:
+                    result = run_cmd("bash run_test.sh", cwd=repo)
+                    passed = 1 if result.returncode == 0 else 0
 
     # Always log result
     with open(RESULTS_FILE, "a", newline="") as f:
