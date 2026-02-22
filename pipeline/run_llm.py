@@ -24,7 +24,7 @@ from extract_block import extract_buggy_block
 # Deterministic + Controlled CPU
 # ------------------------------
 torch.manual_seed(42)
-torch.set_num_threads(4)  # Control CPU usage (adjust if needed)
+torch.set_num_threads(4)  # Human note: keep CPU pressure predictable
 
 MODEL_NAME = os.environ["MODEL_NAME"]
 BUGGY_FILE = os.environ["BUGGY_FILE"]
@@ -37,13 +37,9 @@ OLLAMA_REQUEST_TIMEOUT = int(os.environ.get("OLLAMA_REQUEST_TIMEOUT", "900"))
 
 
 def resolve_ollama_model_name(model_name):
-    """
-    Accepts either Ollama tags (e.g. qwen2.5-coder:1.5b)
-    or some HF-style ids and maps common ones.
-    """
+    """Accept either Ollama tag or map common HF-style names."""
     lowered = model_name.lower().strip()
 
-    # already looks like an ollama tag
     if ":" in lowered and "/" not in lowered:
         return lowered
 
@@ -51,22 +47,18 @@ def resolve_ollama_model_name(model_name):
         "qwen/qwen2.5-coder-1.5b": "qwen2.5-coder:1.5b",
         "qwen/qwen2.5-coder-3b": "qwen2.5-coder:3b",
         "qwen/qwen2.5-coder-7b": "qwen2.5-coder:7b",
-        "codellama:7b-instruct": "codellama:7b-instruct",
         "codellama/codellama-7b-instruct-hf": "codellama:7b-instruct",
         "deepseek-ai/deepseek-coder-1.3b-base": "deepseek-coder:1.3b",
     }
     return mapping.get(lowered, model_name)
 
 
-# ------------------------------
-# Model Loading
-# ------------------------------
 def load_hf_model():
     tok = AutoTokenizer.from_pretrained(MODEL_NAME)
 
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_NAME,
-        dtype=torch.float32,  # Stable on CPU
+        dtype=torch.float32,
         low_cpu_mem_usage=True,
     )
 
@@ -126,9 +118,6 @@ def generate_with_hf(prompt, tokenizer, model):
     return tokenizer.decode(gen_only, skip_special_tokens=True)
 
 
-# ------------------------------
-# Clean Generated Code
-# ------------------------------
 def extract_clean_code(text):
     text = text.replace("```python", "").replace("```", "").strip()
 
@@ -140,9 +129,6 @@ def extract_clean_code(text):
 
 
 def enforce_block_name(generated_code, block_type, expected_name):
-    """
-    Ensure the generated top-level def/class keeps the same target name.
-    """
     if not generated_code.strip():
         return generated_code
 
@@ -162,9 +148,6 @@ def enforce_block_name(generated_code, block_type, expected_name):
     return generated_code[:start] + expected_name + generated_code[end:]
 
 
-# ------------------------------
-# Main Execution
-# ------------------------------
 if __name__ == "__main__":
 
     with open(BUGGY_FILE, "r") as f:
@@ -191,19 +174,22 @@ Keep the exact same {block_type} name: {block_name}
     if LLM_BACKEND != "ollama":
         tokenizer, model = load_hf_model()
 
-    # Optional warm-up runs before measured run
+    # Human note: warmup is outside measured region by design.
     for _ in range(max(WARMUP_RUNS, 0)):
         if LLM_BACKEND == "ollama":
             _ = generate_with_ollama(prompt)
         else:
             _ = generate_with_hf(prompt, tokenizer, model)
 
-    # ------------------------------
-    # Energy Measurement Start
-    # ------------------------------
-    pyRAPL.setup()
-    meter = pyRAPL.Measurement("llm_inference")
-    meter.begin()
+    rapl_available = 1
+    meter = None
+    try:
+        pyRAPL.setup()
+        meter = pyRAPL.Measurement("llm_inference")
+        meter.begin()
+    except Exception:
+        # Human note: HPC often blocks RAPL permissions.
+        rapl_available = 0
 
     tracemalloc.start()
     start = time.time()
@@ -213,26 +199,18 @@ Keep the exact same {block_type} name: {block_name}
     else:
         raw = generate_with_hf(prompt, tokenizer, model)
 
-    # ------------------------------
-    # Energy Measurement End
-    # ------------------------------
-    meter.end()
+    if meter is not None:
+        meter.end()
 
     duration = time.time() - start
 
-    # Energy in microjoules → joules
-    energy_uj = meter.result.pkg[0] if meter.result.pkg else 0.0
+    energy_uj = meter.result.pkg[0] if (meter is not None and meter.result.pkg) else 0.0
     energy_joules = energy_uj / 1e6
-
-    # Compute Power (W = J / s)
     power_watts = energy_joules / duration if duration > 0 else 0.0
 
     _, peak_mem = tracemalloc.get_traced_memory()
     tracemalloc.stop()
 
-    # ------------------------------
-    # Clean Output
-    # ------------------------------
     cleaned = extract_clean_code(raw)
     if not cleaned.strip():
         cleaned = "# ERROR: LLM returned no valid Python code"
@@ -245,9 +223,6 @@ Keep the exact same {block_type} name: {block_name}
 
     open("llm_patch_block.py", "w").write(cleaned)
 
-    # ------------------------------
-    # Final Logging
-    # ------------------------------
     print("Patch generated → llm_patch_block.py")
     print(
         f"LLM_RESULT "
@@ -258,5 +233,6 @@ Keep the exact same {block_type} name: {block_name}
         f"backend={LLM_BACKEND} "
         f"warmup_runs={WARMUP_RUNS} "
         f"ollama_keep_alive={OLLAMA_KEEP_ALIVE} "
-        f"ollama_request_timeout={OLLAMA_REQUEST_TIMEOUT}"
+        f"ollama_request_timeout={OLLAMA_REQUEST_TIMEOUT} "
+        f"rapl_available={rapl_available}"
     )
