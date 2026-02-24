@@ -1,6 +1,6 @@
 # ============================================================
 # run_llm.py
-# - CPU optimized
+# - CPU/GPU optimized
 # - Deterministic runs
 # - Proper energy + power logging
 # - Thread controlled for reproducibility
@@ -34,6 +34,45 @@ OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 OLLAMA_KEEP_ALIVE = os.environ.get("OLLAMA_KEEP_ALIVE", "0")
 WARMUP_RUNS = int(os.environ.get("WARMUP_RUNS", "0"))
 OLLAMA_REQUEST_TIMEOUT = int(os.environ.get("OLLAMA_REQUEST_TIMEOUT", "900"))
+HF_DEVICE = os.environ.get("HF_DEVICE", "auto").strip().lower()
+HF_DTYPE = os.environ.get("HF_DTYPE", "auto").strip().lower()
+
+
+def resolve_hf_device():
+    if HF_DEVICE == "cpu":
+        return torch.device("cpu")
+
+    if HF_DEVICE.startswith("cuda"):
+        # Supports cuda / cuda:0 / cuda:1 ...
+        if torch.cuda.is_available():
+            return torch.device(HF_DEVICE)
+        return torch.device("cpu")
+
+    if HF_DEVICE == "gpu":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # auto
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def resolve_hf_dtype(device):
+    if HF_DTYPE == "float32":
+        return torch.float32
+
+    if HF_DTYPE == "float16":
+        # float16 on CPU is not useful; keep stable fallback.
+        return torch.float16 if device.type == "cuda" else torch.float32
+
+    if HF_DTYPE == "bfloat16":
+        if device.type == "cuda":
+            return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        return torch.bfloat16
+
+    # auto
+    if device.type == "cuda":
+        return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+
+    return torch.float32
 
 
 def resolve_ollama_model_name(model_name):
@@ -54,16 +93,20 @@ def resolve_ollama_model_name(model_name):
 
 
 def load_hf_model():
+    device = resolve_hf_device()
+    dtype = resolve_hf_dtype(device)
+
     tok = AutoTokenizer.from_pretrained(MODEL_NAME)
 
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_NAME,
-        dtype=torch.float32,
+        torch_dtype=dtype,
         low_cpu_mem_usage=True,
     )
 
+    model.to(device)
     model.eval()
-    return tok, model
+    return tok, model, device, dtype
 
 
 def generate_with_ollama(prompt):
@@ -98,13 +141,13 @@ def generate_with_ollama(prompt):
         )
 
 
-def generate_with_hf(prompt, tokenizer, model):
+def generate_with_hf(prompt, tokenizer, model, device):
     encoded = tokenizer(
         prompt,
         return_tensors="pt",
         truncation=True,
         max_length=2048,
-    )
+    ).to(device)
 
     with torch.no_grad():
         output_ids = model.generate(
@@ -171,15 +214,16 @@ Keep the exact same {block_type} name: {block_name}
 """
 
     tokenizer, model = (None, None)
+    hf_device, hf_dtype = (None, None)
     if LLM_BACKEND != "ollama":
-        tokenizer, model = load_hf_model()
+        tokenizer, model, hf_device, hf_dtype = load_hf_model()
 
     # Human note: warmup is outside measured region by design.
     for _ in range(max(WARMUP_RUNS, 0)):
         if LLM_BACKEND == "ollama":
             _ = generate_with_ollama(prompt)
         else:
-            _ = generate_with_hf(prompt, tokenizer, model)
+            _ = generate_with_hf(prompt, tokenizer, model, hf_device)
 
     rapl_available = 1
     meter = None
@@ -197,7 +241,7 @@ Keep the exact same {block_type} name: {block_name}
     if LLM_BACKEND == "ollama":
         raw = generate_with_ollama(prompt)
     else:
-        raw = generate_with_hf(prompt, tokenizer, model)
+        raw = generate_with_hf(prompt, tokenizer, model, hf_device)
 
     if meter is not None:
         meter.end()
@@ -234,5 +278,7 @@ Keep the exact same {block_type} name: {block_name}
         f"warmup_runs={WARMUP_RUNS} "
         f"ollama_keep_alive={OLLAMA_KEEP_ALIVE} "
         f"ollama_request_timeout={OLLAMA_REQUEST_TIMEOUT} "
-        f"rapl_available={rapl_available}"
+        f"rapl_available={rapl_available} "
+        f"hf_device={(hf_device.type if hf_device else 'n/a')} "
+        f"hf_dtype={(str(hf_dtype).replace('torch.', '') if hf_dtype else 'n/a')}"
     )
