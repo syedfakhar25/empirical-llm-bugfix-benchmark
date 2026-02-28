@@ -7,6 +7,7 @@
 # - Supports HF and Ollama backends
 # ============================================================
 
+import ast
 import json
 import os
 import re
@@ -43,7 +44,6 @@ def resolve_hf_device():
         return torch.device("cpu")
 
     if HF_DEVICE.startswith("cuda"):
-        # Supports cuda / cuda:0 / cuda:1 ...
         if torch.cuda.is_available():
             return torch.device(HF_DEVICE)
         return torch.device("cpu")
@@ -51,7 +51,6 @@ def resolve_hf_device():
     if HF_DEVICE == "gpu":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # auto
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -60,7 +59,6 @@ def resolve_hf_dtype(device):
         return torch.float32
 
     if HF_DTYPE == "float16":
-        # float16 on CPU is not useful; keep stable fallback.
         return torch.float16 if device.type == "cuda" else torch.float32
 
     if HF_DTYPE == "bfloat16":
@@ -68,7 +66,6 @@ def resolve_hf_dtype(device):
             return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
         return torch.bfloat16
 
-    # auto
     if device.type == "cuda":
         return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
 
@@ -161,14 +158,46 @@ def generate_with_hf(prompt, tokenizer, model, device):
     return tokenizer.decode(gen_only, skip_special_tokens=True)
 
 
-def extract_clean_code(text):
+def _extract_first_top_level_block(code_text):
+    try:
+        tree = ast.parse(code_text)
+    except Exception:
+        return ""
+
+    if not tree.body:
+        return ""
+
+    node = tree.body[0]
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return ""
+
+    lines = code_text.splitlines()
+    return "\n".join(lines[node.lineno - 1 : node.end_lineno]).strip()
+
+
+def extract_clean_code(text, expected_kind, expected_name):
     text = text.replace("```python", "").replace("```", "").strip()
+
+    if "### SOLUTION ###" in text:
+        text = text.split("### SOLUTION ###", 1)[1].strip()
+
+    expected_pattern = rf"^\s*{expected_kind}\s+{re.escape(expected_name)}\b"
+    m_expected = re.search(expected_pattern, text, flags=re.MULTILINE)
+    if m_expected:
+        candidate = text[m_expected.start() :]
+        candidate = re.split(r"\n\s*###\s+", candidate, maxsplit=1)[0].strip()
+        block = _extract_first_top_level_block(candidate)
+        if block:
+            return block
 
     m = re.search(r"(def|class)\s+[A-Za-z0-9_]+", text)
     if not m:
         return ""
 
-    return text[m.start() :].strip()
+    candidate = text[m.start() :]
+    candidate = re.split(r"\n\s*###\s+", candidate, maxsplit=1)[0].strip()
+    block = _extract_first_top_level_block(candidate)
+    return block or candidate
 
 
 def enforce_block_name(generated_code, block_type, expected_name):
@@ -203,11 +232,13 @@ if __name__ == "__main__":
         exit(0)
 
     block_type, block_name, buggy_block = block_info
+    expected_kind = "def" if block_type == "function" else "class"
 
     prompt = f"""
 Fix the following {block_type} '{block_name}'.
 Return ONLY the corrected {block_type} code.
 Keep the exact same {block_type} name: {block_name}
+Do not include explanations, tests, markdown, or extra sections.
 
 ### CODE ###
 {buggy_block}
@@ -218,7 +249,6 @@ Keep the exact same {block_type} name: {block_name}
     if LLM_BACKEND != "ollama":
         tokenizer, model, hf_device, hf_dtype = load_hf_model()
 
-    # Human note: warmup is outside measured region by design.
     for _ in range(max(WARMUP_RUNS, 0)):
         if LLM_BACKEND == "ollama":
             _ = generate_with_ollama(prompt)
@@ -232,7 +262,6 @@ Keep the exact same {block_type} name: {block_name}
         meter = pyRAPL.Measurement("llm_inference")
         meter.begin()
     except Exception:
-        # Human note: HPC often blocks RAPL permissions.
         rapl_available = 0
 
     tracemalloc.start()
@@ -255,13 +284,13 @@ Keep the exact same {block_type} name: {block_name}
     _, peak_mem = tracemalloc.get_traced_memory()
     tracemalloc.stop()
 
-    cleaned = extract_clean_code(raw)
+    cleaned = extract_clean_code(raw, expected_kind=expected_kind, expected_name=block_name)
     if not cleaned.strip():
         cleaned = "# ERROR: LLM returned no valid Python code"
     else:
         cleaned = enforce_block_name(
             cleaned,
-            "def" if block_type == "function" else "class",
+            expected_kind,
             block_name,
         )
 
