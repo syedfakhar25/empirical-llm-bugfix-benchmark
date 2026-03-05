@@ -1,313 +1,241 @@
 # ============================================================
-# run_llm.py
-# - CPU/GPU optimized
-# - Deterministic runs
-# - Proper energy + power logging
-# - Thread controlled for reproducibility
-# - Supports HF and Ollama backends
+# For ME: ALWAYS ->  venv/bin/activate
+# ============================================================
+# run_experiment.py (Per-bug isolated venv version)
 # ============================================================
 
+import argparse
 import ast
+import csv
 import json
 import os
+import platform
 import re
+import shutil
+import socket
+import subprocess
 import time
-import tracemalloc
-from urllib import error, request
-
-import pyRAPL
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from datetime import datetime
 
 from extract_block import extract_buggy_block
 
-# ------------------------------
-# Deterministic + Controlled CPU
-# ------------------------------
-torch.manual_seed(42)
-torch.set_num_threads(4)  # Human note: keep CPU pressure predictable
-
-MODEL_NAME = os.environ["MODEL_NAME"]
-BUGGY_FILE = os.environ["BUGGY_FILE"]
-PATCH_FILE = os.environ["PATCH_FILE"]
-LLM_BACKEND = os.environ.get("LLM_BACKEND", "hf").strip().lower()
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
-OLLAMA_KEEP_ALIVE = os.environ.get("OLLAMA_KEEP_ALIVE", "0")
-WARMUP_RUNS = int(os.environ.get("WARMUP_RUNS", "0"))
-OLLAMA_REQUEST_TIMEOUT = int(os.environ.get("OLLAMA_REQUEST_TIMEOUT", "900"))
-HF_DEVICE = os.environ.get("HF_DEVICE", "auto").strip().lower()
-HF_DTYPE = os.environ.get("HF_DTYPE", "auto").strip().lower()
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PIPE = os.path.join(ROOT, "pipeline")
+DEFAULT_PROJECTS = os.path.join(ROOT, "..", "BugsInPy", "projects")
+RESULTS_FILE = os.path.join(ROOT, "results/results.csv")
+RUN_LLM = os.path.join(PIPE, "run_llm.py")
+SELECTED_BUGS_FILE = os.path.join(ROOT, "selected_bugs.json")
 
 
-def resolve_hf_device():
-    if HF_DEVICE == "cpu":
-        return torch.device("cpu")
-
-    if HF_DEVICE.startswith("cuda"):
-        if torch.cuda.is_available():
-            return torch.device(HF_DEVICE)
-        return torch.device("cpu")
-
-    if HF_DEVICE == "gpu":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-def resolve_hf_dtype(device):
-    if HF_DTYPE == "float32":
-        return torch.float32
-
-    if HF_DTYPE == "float16":
-        return torch.float16 if device.type == "cuda" else torch.float32
-
-    if HF_DTYPE == "bfloat16":
-        if device.type == "cuda":
-            return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-        return torch.bfloat16
-
-    if device.type == "cuda":
-        return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-
-    return torch.float32
-
-
-def resolve_ollama_model_name(model_name):
-    """Accept either Ollama tag or map common HF-style names."""
-    lowered = model_name.lower().strip()
-
-    if ":" in lowered and "/" not in lowered:
-        return lowered
-
-    mapping = {
-        "qwen/qwen2.5-coder-1.5b": "qwen2.5-coder:1.5b",
-        "qwen/qwen2.5-coder-3b": "qwen2.5-coder:3b",
-        "qwen/qwen2.5-coder-7b": "qwen2.5-coder:7b",
-        "codellama/codellama-7b-instruct-hf": "codellama:7b-instruct",
-        "deepseek-ai/deepseek-coder-1.3b-base": "deepseek-coder:1.3b",
-    }
-    return mapping.get(lowered, model_name)
-
-
-def load_hf_model():
-    device = resolve_hf_device()
-    dtype = resolve_hf_dtype(device)
-
-    tok = AutoTokenizer.from_pretrained(MODEL_NAME)
-
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME,
-        torch_dtype=dtype,
-        low_cpu_mem_usage=True,
+def run_cmd(cmd, cwd=None, timeout=None):
+    return subprocess.run(
+        cmd,
+        cwd=cwd,
+        shell=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=timeout,
     )
 
-    model.to(device)
-    model.eval()
-    return tok, model, device, dtype
+
+def create_virtualenv(venv_path):
+    run_cmd(f"python3 -m venv {venv_path}")
+    pip_path = os.path.join(venv_path, "bin", "pip")
+    run_cmd(f"{pip_path} install --upgrade pip")
 
 
-def generate_with_ollama(prompt):
-    resolved_model = resolve_ollama_model_name(MODEL_NAME)
-    payload = {
-        "model": resolved_model,
-        "prompt": prompt,
-        "stream": False,
-        "keep_alive": OLLAMA_KEEP_ALIVE,
-        "options": {
-            "temperature": 0,
-            "num_predict": 240,
-            "seed": 42,
-        },
-    }
+def install_requirements(venv_path, requirements_file):
+    pip_path = os.path.join(venv_path, "bin", "pip")
+    if os.path.exists(requirements_file):
+        run_cmd(f"{pip_path} install -r {requirements_file}")
 
-    req = request.Request(
-        f"{OLLAMA_URL.rstrip('/')}/api/generate",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
+def install_common_test_tools(venv_path):
+    pip_path = os.path.join(venv_path, "bin", "pip")
+    run_cmd(f"{pip_path} install pytest")
+    run_cmd(f"{pip_path} install pytest-xdist")
+    run_cmd(f"{pip_path} install pytest-httpbin")
+
+def detect_job_scheduler():
+    if os.environ.get("SLURM_JOB_ID"):
+        return "slurm", os.environ.get("SLURM_JOB_ID")
+    return "local", ""
+
+
+def ensure_repo_copy(repo_cache_root, url, project, eval_dir):
+    cache_repo = os.path.join(repo_cache_root, project)
+    target_repo = os.path.join(eval_dir, project)
+
+    if not os.path.exists(cache_repo):
+        os.makedirs(repo_cache_root, exist_ok=True)
+        clone = run_cmd(f"git clone {url} {cache_repo}")
+        if clone.returncode != 0:
+            raise RuntimeError(f"Clone failed: {clone.stderr}")
+
+    if os.path.exists(target_repo):
+        shutil.rmtree(target_repo)
+
+    shutil.copytree(cache_repo, target_repo)
+    return target_repo
+
+
+def run_single(args, project, bug_id, run_id):
+
+    model_safe = args.model.replace("/", "_")
+    eval_dir = os.path.join(
+        args.eval_root,
+        f"eval_{project}_{bug_id}_{model_safe}_{run_id}",
     )
 
-    try:
-        with request.urlopen(req, timeout=OLLAMA_REQUEST_TIMEOUT) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        return data.get("response", "")
-    except error.URLError as exc:
-        raise RuntimeError(
-            f"Failed to call Ollama at {OLLAMA_URL}. "
-            f"Check service is running and model is pulled. Details: {exc}"
+    if os.path.exists(eval_dir):
+        shutil.rmtree(eval_dir)
+    os.makedirs(eval_dir, exist_ok=True)
+
+    print(f"\n=== {project} Bug {bug_id} | {args.model} | Run {run_id} ===")
+
+    scheduler, scheduler_job_id = detect_job_scheduler()
+    hostname = socket.gethostname()
+    cpu_count = os.cpu_count() or 0
+
+    project_info = os.path.join(args.bugsinpy_projects_dir, project, "project.info")
+    url = None
+    for line in open(project_info):
+        if line.startswith("github_url"):
+            url = line.split("=")[1].strip().strip('"')
+
+    repo = ensure_repo_copy(args.repo_cache_root, url, project, eval_dir)
+
+    bug_info = os.path.join(
+        args.bugsinpy_projects_dir, project, "bugs", str(bug_id), "bug.info"
+    )
+    commit = None
+    for line in open(bug_info):
+        if "buggy_commit_id" in line:
+            commit = line.split("=")[1].strip().strip('"')
+
+    run_cmd(f"git checkout {commit}", cwd=repo)
+
+    # -------------------------
+    # CREATE PER-BUG VENV
+    # -------------------------
+    venv_path = os.path.join(eval_dir, "venv")
+    create_virtualenv(venv_path)
+
+    requirements_file = os.path.join(
+        args.bugsinpy_projects_dir,
+        project,
+        "bugs",
+        str(bug_id),
+        "requirements.txt",
+    )
+
+    install_requirements(venv_path, requirements_file)
+    install_common_test_tools(venv_path)
+
+    python_bin = os.path.join(venv_path, "bin", "python")
+
+    # -------------------------
+    # RUN LLM
+    # -------------------------
+    patch_file = os.path.join(
+        args.bugsinpy_projects_dir,
+        project,
+        "bugs",
+        str(bug_id),
+        "bug_patch.txt",
+    )
+
+    diff_line = [l for l in open(patch_file) if l.startswith("diff --git")][0]
+    buggy_rel = re.search(r"a/(.+?) ", diff_line).group(1)
+    buggy_path = os.path.join(repo, buggy_rel)
+
+    os.environ["MODEL_NAME"] = args.model
+    os.environ["BUGGY_FILE"] = buggy_path
+    os.environ["PATCH_FILE"] = patch_file
+    os.environ["LLM_BACKEND"] = args.backend
+
+    llm_start = time.time()
+    llm_output = run_cmd(f"python3 {RUN_LLM}", cwd=eval_dir)
+    llm_wall_time = time.time() - llm_start
+
+    duration_match = re.search(r"duration=([0-9\.]+)", llm_output.stdout)
+    energy_match = re.search(r"energy=([0-9\.]+)", llm_output.stdout)
+
+    duration = float(duration_match.group(1)) if duration_match else llm_wall_time
+    energy_joules = float(energy_match.group(1)) if energy_match else 0.0
+
+    # -------------------------
+    # APPLY PATCH + RUN TEST
+    # -------------------------
+    passed = 0
+    test_returncode = -1
+
+    patch_file_path = os.path.join(eval_dir, "llm_patch_block.py")
+
+    if os.path.exists(patch_file_path):
+        fixed_block = open(patch_file_path).read()
+
+        target_info = extract_buggy_block(open(buggy_path).read(), patch_file)
+
+        if target_info:
+            block_type, block_name, _ = target_info
+
+            tree = ast.parse(open(buggy_path).read())
+            lines = open(buggy_path).read().splitlines()
+
+            for node in tree.body:
+                if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name == block_name:
+                    start = node.lineno - 1
+                    end = node.end_lineno
+                    lines = lines[:start] + fixed_block.splitlines() + lines[end:]
+                    break
+
+            with open(buggy_path, "w") as f:
+                f.write("\n".join(lines))
+
+            test_cmd = f"{python_bin} -m pytest"
+            result = run_cmd(test_cmd, cwd=repo)
+            test_returncode = result.returncode
+            passed = 1 if result.returncode == 0 else 0
+
+    # -------------------------
+    # LOG RESULTS
+    # -------------------------
+    with open(args.results_file, "a", newline="") as f:
+        csv.writer(f).writerow(
+            [
+                datetime.now().isoformat(),
+                project,
+                bug_id,
+                args.model,
+                run_id,
+                passed,
+                duration,
+                energy_joules,
+                test_returncode,
+                scheduler,
+                scheduler_job_id,
+                hostname,
+                cpu_count,
+                platform.platform(),
+            ]
         )
 
-
-def generate_with_hf(prompt, tokenizer, model, device):
-    encoded = tokenizer(
-        prompt,
-        return_tensors="pt",
-        truncation=True,
-        max_length=2048,
-    ).to(device)
-
-    with torch.no_grad():
-        output_ids = model.generate(
-            **encoded,
-            max_new_tokens=200,
-            temperature=0.0,
-            do_sample=False,
-        )
-
-    gen_only = output_ids[0][encoded["input_ids"].shape[1] :]
-    return tokenizer.decode(gen_only, skip_special_tokens=True)
-
-
-def _extract_first_top_level_block(code_text):
-    try:
-        tree = ast.parse(code_text)
-    except Exception:
-        return ""
-
-    if not tree.body:
-        return ""
-
-    node = tree.body[0]
-    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-        return ""
-
-    lines = code_text.splitlines()
-    return "\n".join(lines[node.lineno - 1 : node.end_lineno]).strip()
-
-
-def extract_clean_code(text, expected_kind, expected_name):
-    text = text.replace("```python", "").replace("```", "").strip()
-
-    if "### SOLUTION ###" in text:
-        text = text.split("### SOLUTION ###", 1)[1].strip()
-
-    expected_pattern = rf"^\s*{expected_kind}\s+{re.escape(expected_name)}\b"
-    m_expected = re.search(expected_pattern, text, flags=re.MULTILINE)
-    if m_expected:
-        candidate = text[m_expected.start() :]
-        candidate = re.split(r"\n\s*###\s+", candidate, maxsplit=1)[0].strip()
-        block = _extract_first_top_level_block(candidate)
-        if block:
-            return block
-
-    m = re.search(r"(def|class)\s+[A-Za-z0-9_]+", text)
-    if not m:
-        return ""
-
-    candidate = text[m.start() :]
-    candidate = re.split(r"\n\s*###\s+", candidate, maxsplit=1)[0].strip()
-    block = _extract_first_top_level_block(candidate)
-    return block or candidate
-
-
-def enforce_block_name(generated_code, block_type, expected_name):
-    if not generated_code.strip():
-        return generated_code
-
-    pattern = r"^(\s*)(def|class)\s+([A-Za-z0-9_]+)"
-    m = re.search(pattern, generated_code, flags=re.MULTILINE)
-    if not m:
-        return generated_code
-
-    actual_kind = m.group(2)
-    if actual_kind != block_type:
-        return generated_code
-
-    if m.group(3) == expected_name:
-        return generated_code
-
-    start, end = m.span(3)
-    return generated_code[:start] + expected_name + generated_code[end:]
+    print("→ Done.")
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--project", required=True)
+    parser.add_argument("--bug", type=int, required=True)
+    parser.add_argument("--model", required=True)
+    parser.add_argument("--run_id", type=int, required=True)
+    parser.add_argument("--backend", default="hf")
+    parser.add_argument("--bugsinpy_projects_dir", default=DEFAULT_PROJECTS)
+    parser.add_argument("--eval_root", default=PIPE)
+    parser.add_argument("--repo_cache_root", default=os.path.join(PIPE, "repo_cache"))
+    parser.add_argument("--results_file", default=RESULTS_FILE)
 
-    with open(BUGGY_FILE, "r") as f:
-        source = f.read()
+    args = parser.parse_args()
 
-    block_info = extract_buggy_block(source, PATCH_FILE)
-    if not block_info:
-        open("llm_patch_block.py", "w").write("# ERROR: no block detected")
-        print("Patch generated → llm_patch_block.py (empty)")
-        exit(0)
-
-    block_type, block_name, buggy_block = block_info
-    expected_kind = "def" if block_type == "function" else "class"
-
-    prompt = f"""
-Fix the following {block_type} '{block_name}'.
-Return ONLY the corrected {block_type} code.
-Keep the exact same {block_type} name: {block_name}
-Do not include explanations, tests, markdown, or extra sections.
-
-### CODE ###
-{buggy_block}
-"""
-
-    tokenizer, model = (None, None)
-    hf_device, hf_dtype = (None, None)
-    if LLM_BACKEND != "ollama":
-        tokenizer, model, hf_device, hf_dtype = load_hf_model()
-
-    for _ in range(max(WARMUP_RUNS, 0)):
-        if LLM_BACKEND == "ollama":
-            _ = generate_with_ollama(prompt)
-        else:
-            _ = generate_with_hf(prompt, tokenizer, model, hf_device)
-
-    rapl_available = 1
-    meter = None
-    try:
-        pyRAPL.setup()
-        meter = pyRAPL.Measurement("llm_inference")
-        meter.begin()
-    except Exception:
-        rapl_available = 0
-
-    tracemalloc.start()
-    start = time.time()
-
-    if LLM_BACKEND == "ollama":
-        raw = generate_with_ollama(prompt)
-    else:
-        raw = generate_with_hf(prompt, tokenizer, model, hf_device)
-
-    if meter is not None:
-        meter.end()
-
-    duration = time.time() - start
-
-    energy_uj = meter.result.pkg[0] if (meter is not None and meter.result.pkg) else 0.0
-    energy_joules = energy_uj / 1e6
-    power_watts = energy_joules / duration if duration > 0 else 0.0
-
-    _, peak_mem = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
-
-    cleaned = extract_clean_code(raw, expected_kind=expected_kind, expected_name=block_name)
-    if not cleaned.strip():
-        cleaned = "# ERROR: LLM returned no valid Python code"
-    else:
-        cleaned = enforce_block_name(
-            cleaned,
-            expected_kind,
-            block_name,
-        )
-
-    open("llm_patch_block.py", "w").write(cleaned)
-
-    print("Patch generated → llm_patch_block.py")
-    print(
-        f"LLM_RESULT "
-        f"duration={duration:.4f}s "
-        f"mem_peak={peak_mem}bytes "
-        f"energy={energy_joules:.6f}J "
-        f"power={power_watts:.4f}W "
-        f"backend={LLM_BACKEND} "
-        f"warmup_runs={WARMUP_RUNS} "
-        f"ollama_keep_alive={OLLAMA_KEEP_ALIVE} "
-        f"ollama_request_timeout={OLLAMA_REQUEST_TIMEOUT} "
-        f"rapl_available={rapl_available} "
-        f"hf_device={(hf_device.type if hf_device else 'n/a')} "
-        f"hf_dtype={(str(hf_dtype).replace('torch.', '') if hf_dtype else 'n/a')}"
-    )
+    run_single(args, args.project, args.bug, args.run_id)
