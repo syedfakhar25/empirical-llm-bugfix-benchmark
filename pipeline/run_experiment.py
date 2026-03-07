@@ -46,14 +46,22 @@ def run_cmd(cmd, cwd=None):
 
 def create_virtualenv(venv_path, python_exec):
 
-    run_cmd(f"{python_exec} -m venv {venv_path}")
+    base_env = os.path.join(ROOT, "base_env")
 
-    python_bin = os.path.join(venv_path, "bin", "python")
-    pip = os.path.join(venv_path, "bin", "pip")
+    # Create base environment once
+    if not os.path.exists(base_env):
 
-    run_cmd(f"{python_bin} -m ensurepip --upgrade")
+        subprocess.run(f"{python_exec} -m venv {base_env}", shell=True)
 
-    run_cmd(f"{pip} install --upgrade pip setuptools wheel pytest nose")
+        pip = os.path.join(base_env, "bin", "pip")
+
+        subprocess.run(
+            f"{pip} install --upgrade pip setuptools wheel pytest nose",
+            shell=True
+        )
+
+    # Copy base env for this bug
+    shutil.copytree(base_env, venv_path)
 
 
 # ------------------------------------------------------------
