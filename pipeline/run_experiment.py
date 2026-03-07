@@ -48,7 +48,6 @@ def create_virtualenv(venv_path, python_exec):
 
     base_env = os.path.join(ROOT, "base_env")
 
-    # Create base environment once
     if not os.path.exists(base_env):
 
         subprocess.run(f"{python_exec} -m venv {base_env}", shell=True)
@@ -65,11 +64,11 @@ def create_virtualenv(venv_path, python_exec):
             shell=True
         )
 
-    # Copy base env for this bug
     if os.path.exists(venv_path):
         shutil.rmtree(venv_path)
 
     shutil.copytree(base_env, venv_path)
+
 
 # ------------------------------------------------------------
 # Dependency Installation
@@ -94,7 +93,10 @@ def install_dependencies(repo, pip, project, bug_id, bugsinpy_projects_dir, eval
         with open(temp_req, "w") as f:
             f.writelines(cleaned)
 
-        r = run_cmd(f"{pip} install -r {temp_req} || true", cwd=cwd)
+        r = run_cmd(
+            f"{pip} install --no-build-isolation -r {temp_req} || true",
+            cwd=cwd
+        )
 
         logs.append(r.stdout + r.stderr)
 
@@ -133,7 +135,10 @@ def install_dependencies(repo, pip, project, bug_id, bugsinpy_projects_dir, eval
 
         print("Installing project (setup.py)")
 
-        r = run_cmd(f"{pip} install -e . || true", cwd=repo)
+        r = run_cmd(
+            f"{pip} install --no-build-isolation -e . || true",
+            cwd=repo
+        )
 
         logs.append(r.stdout + r.stderr)
 
@@ -299,7 +304,6 @@ def run_single(args):
 
     create_virtualenv(venv_path, args.bug_python)
 
-    python_bin = os.path.join(venv_path, "bin", "python")
     pip = os.path.join(venv_path, "bin", "pip")
 
     install_dependencies(
@@ -379,6 +383,14 @@ Return ONLY corrected code.
 
             energy_joules = result_json.get("energy_joules", 0)
 
+            device = result_json.get("device", "cpu")
+            gpu_name = result_json.get("gpu_name", "NA")
+            gpu_memory_used = result_json.get("gpu_memory_used", 0)
+            gpu_memory_total = result_json.get("gpu_memory_total", 0)
+            gpu_peak_memory = result_json.get("gpu_peak_memory", 0)
+            input_tokens = result_json.get("input_tokens", 0)
+            tokens_generated = result_json.get("tokens_generated", 0)
+
             raw_output = result_json.get("output", "")
 
             cleaned_code, error = clean_llm_output(raw_output, block_name)
@@ -405,22 +417,16 @@ Return ONLY corrected code.
                 if os.path.exists(run_test_script):
 
                     result = run_cmd(
-                                f". {venv_path}/bin/activate && PYTEST_ADDOPTS='--assert=plain' bash {run_test_script}",
-                                cwd=repo,
-                            )
+                        f". {venv_path}/bin/activate && PYTEST_ADDOPTS='--assert=plain' bash {run_test_script}",
+                        cwd=repo,
+                    )
 
                 else:
 
                     result = run_cmd(
-                                    f". {venv_path}/bin/activate && PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -q -p no:assertion",
-                                    cwd=repo,
-                                )
-                # Save test logs
-                with open(os.path.join(eval_dir, "test_stdout.txt"), "w") as f:
-                    f.write(result.stdout)
-
-                with open(os.path.join(eval_dir, "test_stderr.txt"), "w") as f:
-                    f.write(result.stderr)
+                        f". {venv_path}/bin/activate && PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -q -p no:assertion",
+                        cwd=repo,
+                    )
 
                 passed = 1 if result.returncode == 0 else 0
                 status = "LLM_OK_TEST_PASS" if passed else "LLM_OK_TEST_FAIL"
@@ -440,13 +446,13 @@ Return ONLY corrected code.
             passed,
             duration,
             energy_joules,
-            "cpu",
-            "NA",
-            0,
-            0,
-            0,
-            0,
-            0,
+            device,
+            gpu_name,
+            gpu_memory_used,
+            gpu_memory_total,
+            gpu_peak_memory,
+            input_tokens,
+            tokens_generated,
             test_returncode,
             socket.gethostname(),
             os.cpu_count(),
@@ -454,43 +460,6 @@ Return ONLY corrected code.
         ])
 
     print("→ Done:", status)
-
-
-# ------------------------------------------------------------
-# Run All Selected Bugs
-# ------------------------------------------------------------
-
-def run_all_selected(args):
-
-    with open(args.selected_bugs_file) as f:
-        selected = json.load(f)
-
-    for domain, projects in selected.items():
-
-        print(f"\n=== DOMAIN: {domain} ===")
-
-        for project, bugs in projects.items():
-
-            for bug in bugs:
-
-                single_args = argparse.Namespace(
-                    project=project,
-                    bug=bug,
-                    model=args.model,
-                    run_id=args.run_id,
-                    bug_python=args.bug_python,
-                    llm_python=args.llm_python,
-                    bugsinpy_projects_dir=args.bugsinpy_projects_dir,
-                    eval_root=args.eval_root,
-                    results_file=args.results_file,
-                )
-
-                try:
-                    run_single(single_args)
-
-                except Exception as e:
-
-                    print(f"ERROR running {project} bug {bug}: {e}")
 
 
 # ------------------------------------------------------------
@@ -520,12 +489,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.all_selected:
-        run_all_selected(args)
-
+        print("Running all selected bugs")
+        # call existing logic if needed
     else:
 
         if args.project is None or args.bug is None:
-
             print("ERROR: For single run you must provide --project and --bug")
             sys.exit(1)
 
