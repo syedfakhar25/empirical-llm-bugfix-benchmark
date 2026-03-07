@@ -66,26 +66,10 @@ def create_virtualenv(venv_path, python_exec):
         )
 
     # Copy base env for this bug
+    if os.path.exists(venv_path):
+        shutil.rmtree(venv_path)
+
     shutil.copytree(base_env, venv_path)
-
-    base_env = os.path.join(ROOT, "base_env")
-
-    # Create base environment once
-    if not os.path.exists(base_env):
-
-        subprocess.run(
-                f"{pip} install --upgrade pip",
-                shell=True
-            )
-
-        subprocess.run(
-            f"{pip} install 'setuptools<70' 'cython<3' wheel pytest nose",
-            shell=True
-        )
-
-    # Copy base env for this bug
-    shutil.copytree(base_env, venv_path)
-
 
 # ------------------------------------------------------------
 # Dependency Installation
