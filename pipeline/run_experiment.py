@@ -496,7 +496,6 @@ def run_all_selected(args):
 # ------------------------------------------------------------
 # Main
 # ------------------------------------------------------------
-
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
@@ -521,41 +520,8 @@ if __name__ == "__main__":
 
     if args.all_selected:
         run_all_selected(args)
-
     else:
         if args.project is None or args.bug is None:
-            print("ERROR: For single run you must provide --project and --bug")
-            sys.exit(1)
-
-        run_single(args)
-
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument("--project")
-    parser.add_argument("--bug", type=int)
-
-    parser.add_argument("--all_selected", action="store_true")
-    parser.add_argument("--selected_bugs_file", default="selected_bugs.json")
-
-    parser.add_argument("--model", required=True)
-    parser.add_argument("--run_id", type=int, required=True)
-
-    parser.add_argument("--bug-python", required=True)
-    parser.add_argument("--llm-python", default=sys.executable)
-
-    parser.add_argument("--bugsinpy_projects_dir", default=DEFAULT_PROJECTS)
-    parser.add_argument("--eval_root", default=PIPE)
-    parser.add_argument("--results_file", default=RESULTS_FILE)
-
-    args = parser.parse_args()
-
-    if args.all_selected:
-        run_all_selected(args)
-
-    else:
-
-        if args.project is None or args.bug is None:
-
             print("ERROR: For single run you must provide --project and --bug")
             sys.exit(1)
 
