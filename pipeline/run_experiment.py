@@ -416,16 +416,25 @@ Return ONLY corrected code.
                 if os.path.exists(run_test_script):
 
                     result = run_cmd(
-                                f". {venv_path}/bin/activate && PYTEST_ADDOPTS='--assert=plain' bash {run_test_script}",
-                                cwd=repo,
-                            )
+                        f". {venv_path}/bin/activate && PYTEST_ADDOPTS='--assert=plain' bash {run_test_script}",
+                        cwd=repo,
+                    )
+
+                    # Fallback if pytest collected nothing
+                    if "collected 0 items" in result.stdout or "collected 0 items" in result.stderr:
+                        print("Fallback: running full pytest suite", flush=True)
+
+                        result = run_cmd(
+                            f". {venv_path}/bin/activate && pytest -q",
+                            cwd=repo,
+                        )
 
                 else:
 
                     result = run_cmd(
-                                    f". {venv_path}/bin/activate && PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -q -p no:assertion",
-                                    cwd=repo,
-                                )
+                        f". {venv_path}/bin/activate && pytest -q",
+                        cwd=repo,
+                    )
                 # Save test logs
                 with open(os.path.join(eval_dir, "test_stdout.txt"), "w") as f:
                     f.write(result.stdout)
