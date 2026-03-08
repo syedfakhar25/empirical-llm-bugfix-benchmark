@@ -425,7 +425,7 @@ Return ONLY corrected code.
                         print("Fallback: running full pytest suite", flush=True)
 
                         result = run_cmd(
-                            f". {venv_path}/bin/activate && pytest -q",
+                            f". {venv_path}/bin/activate && pytest -q  --maxfail=1",
                             cwd=repo,
                         )
 
