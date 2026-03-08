@@ -30,14 +30,19 @@ RUN_LLM = os.path.join(PIPE, "run_llm.py")
 
 def run_cmd(cmd, cwd=None):
 
-    return subprocess.run(
+    result = subprocess.run(
         cmd,
         cwd=cwd,
         shell=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
+        text=True
     )
+
+    print(result.stdout, flush=True)
+    print(result.stderr, flush=True)
+
+    return result
 
 
 # ------------------------------------------------------------
@@ -94,7 +99,10 @@ def install_dependencies(repo, pip, project, bug_id, bugsinpy_projects_dir, eval
         with open(temp_req, "w") as f:
             f.writelines(cleaned)
 
-        r = run_cmd(f"{pip} install -r {temp_req} || true", cwd=cwd)
+        r = run_cmd(
+                    f"{pip} install --prefer-binary --no-input -r {temp_req} || true",
+                    cwd=cwd
+                )
 
         logs.append(r.stdout + r.stderr)
 
@@ -280,7 +288,9 @@ def run_single(args):
 
     repo = os.path.join(eval_dir, project)
 
-    run_cmd(f"git clone --depth 1 {url} {repo}")
+    result = run_cmd(f"git clone {url} {repo}")
+    if result.returncode != 0:
+        raise RuntimeError(f"GIT CLONE FAILED")
 
     bug_info = os.path.join(
         args.bugsinpy_projects_dir, project, "bugs", str(bug_id), "bug.info"
@@ -293,13 +303,14 @@ def run_single(args):
         if "buggy_commit_id" in line:
             commit = line.split("=")[1].strip().strip('"')
 
-    run_cmd(f"git checkout {commit}", cwd=repo)
+    result = run_cmd(f"git checkout {commit}", cwd=repo)
+    if result.returncode != 0:
+        raise RuntimeError(f"GIT CHECKOUT FAILED")
 
     venv_path = os.path.join(eval_dir, "venv")
 
     create_virtualenv(venv_path, args.bug_python)
 
-    python_bin = os.path.join(venv_path, "bin", "python")
     pip = os.path.join(venv_path, "bin", "pip")
 
     install_dependencies(
