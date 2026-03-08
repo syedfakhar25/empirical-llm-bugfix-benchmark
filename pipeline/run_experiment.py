@@ -133,7 +133,7 @@ def install_dependencies(repo, pip, project, bug_id, bugsinpy_projects_dir, eval
 
         print("Installing project (setup.py)")
 
-        r = run_cmd(f"{pip} install -e . || true", cwd=repo)
+        r = run_cmd(f"{pip} install --no-deps -e . || true", cwd=repo)
 
         logs.append(r.stdout + r.stderr)
 
@@ -280,7 +280,7 @@ def run_single(args):
 
     repo = os.path.join(eval_dir, project)
 
-    run_cmd(f"git clone {url} {repo}")
+    run_cmd(f"git clone --depth 1 {url} {repo}")
 
     bug_info = os.path.join(
         args.bugsinpy_projects_dir, project, "bugs", str(bug_id), "bug.info"
