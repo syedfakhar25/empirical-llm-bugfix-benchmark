@@ -444,8 +444,9 @@ Return ONLY corrected code.
 
                 passed = 1 if result.returncode == 0 else 0
                 status = "LLM_OK_TEST_PASS" if passed else "LLM_OK_TEST_FAIL"
+                if "ModuleNotFoundError" in result.stderr:
+                    status = "TEST_ENV_ERROR"
                 test_returncode = result.returncode
-
     ensure_csv_header(args.results_file)
 
     with open(args.results_file, "a", newline="") as f:
