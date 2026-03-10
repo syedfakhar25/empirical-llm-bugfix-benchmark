@@ -66,7 +66,7 @@ def create_virtualenv(venv_path, python_exec):
         )
 
         subprocess.run(
-            f"{pip} install 'setuptools<70' 'cython<3' wheel pytest nose pytest-xdist",
+            f"{pip} install 'setuptools<70' 'cython<3' wheel pytest nose pytest-xdist numpy scipy pandas",
             shell=True
         )
 
