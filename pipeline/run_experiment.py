@@ -405,13 +405,13 @@ Return ONLY corrected code.
                 with open(buggy_path, "w") as f:
                     f.write(cleaned_code)
 
-                run_test_script = os.path.join(
-                    args.bugsinpy_projects_dir,
-                    project,
-                    "bugs",
-                    str(bug_id),
-                    "run_test.sh",
-                )
+                run_test_script = os.path.abspath(os.path.join(
+                                        args.bugsinpy_projects_dir,
+                                        project,
+                                        "bugs",
+                                        str(bug_id),
+                                        "run_test.sh",
+                                    ))
 
                 if os.path.exists(run_test_script):
 
