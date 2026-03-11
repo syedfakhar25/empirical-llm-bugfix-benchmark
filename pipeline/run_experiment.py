@@ -39,8 +39,8 @@ def run_cmd(cmd, cwd=None):
         text=True
     )
 
-    print(result.stdout, flush=True)
-    print(result.stderr, flush=True)
+    if result.returncode != 0:
+        print(result.stderr, flush=True)
 
     return result
 
@@ -312,7 +312,8 @@ def run_single(args):
     create_virtualenv(venv_path, args.bug_python)
 
     pip = os.path.join(venv_path, "bin", "pip")
-
+    
+    print("Installing dependencies...", flush=True)
     install_dependencies(
         repo,
         pip,
@@ -355,10 +356,10 @@ def run_single(args):
 
         prompt = f"""Fix the following {block_type} '{block_name}'.
 
-Return ONLY corrected code.
+        Return ONLY corrected code.
 
-{buggy_block}
-"""
+        {buggy_block}
+        """
 
         prompt = prompt.replace('"', '\\"')
 
@@ -370,6 +371,7 @@ Return ONLY corrected code.
             f"--prompt \"{prompt}\""
         )
 
+        print("Running LLM...", flush=True)
         llm_out = run_cmd(cmd, cwd=eval_dir)
 
         duration = time.time() - start
@@ -412,7 +414,7 @@ Return ONLY corrected code.
                                         str(bug_id),
                                         "run_test.sh",
                                     ))
-
+                print("Running tests...", flush=True)
                 if os.path.exists(run_test_script):
 
                     result = run_cmd(
