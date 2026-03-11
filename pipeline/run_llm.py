@@ -147,7 +147,6 @@ def main():
         model = AutoModelForCausalLM.from_pretrained(
             args.model,
             torch_dtype=torch.float16 if device_type == "gpu" else torch.float32,
-            device_map="auto" if device_type == "gpu" else None
         )
 
         model.to(device)
