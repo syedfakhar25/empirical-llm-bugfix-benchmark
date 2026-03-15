@@ -24,10 +24,6 @@ RESULTS_FILE = os.path.join(ROOT, "results/results.csv")
 RUN_LLM = os.path.join(PIPE, "run_llm.py")
 
 
-# ------------------------------------------------------------
-# Utilities
-# ------------------------------------------------------------
-
 def run_cmd(cmd, cwd=None):
 
     result = subprocess.run(
@@ -40,48 +36,30 @@ def run_cmd(cmd, cwd=None):
     )
 
     if result.returncode != 0:
-        print(result.stderr, flush=True)
+        print("Command failed:", cmd)
+        print(result.stderr)
 
     return result
 
 
-# ------------------------------------------------------------
-# Virtual Environment
-# ------------------------------------------------------------
-
 def create_virtualenv(venv_path, python_exec):
 
-    base_env = os.path.join(ROOT, "base_env")
-
-    # Create base environment once
-    if not os.path.exists(base_env):
-
-        subprocess.run(f"{python_exec} -m venv {base_env}", shell=True)
-
-        pip = os.path.join(base_env, "bin", "pip")
-
-        subprocess.run(
-            f"{pip} install --upgrade pip",
-            shell=True
-        )
-
-        subprocess.run(
-            f"{pip} install 'setuptools<70' 'cython<3' wheel pytest nose pytest-xdist numpy scipy pandas",
-            shell=True
-        )
-
-    # Copy base env for this bug
     if os.path.exists(venv_path):
         shutil.rmtree(venv_path)
 
-    shutil.copytree(base_env, venv_path)
+    subprocess.run(f"{python_exec} -m venv {venv_path}", shell=True)
 
-# ------------------------------------------------------------
-# Dependency Installation
-# ------------------------------------------------------------
+    pip = os.path.join(venv_path, "bin", "pip")
 
-def install_dependencies(repo, pip, project, bug_id, bugsinpy_projects_dir, eval_dir):
+    subprocess.run(f"{pip} install --upgrade pip", shell=True)
 
+    subprocess.run(
+        f"{pip} install setuptools wheel pytest pytest-xdist nose mock",
+        shell=True
+    )
+
+
+def install_dependencies(repo, pip, project, bug_id, bugsinpy_projects_dir, eval_dir, bug_python):
     logs = []
 
     def safe_install(req_file, cwd=None):
@@ -100,9 +78,9 @@ def install_dependencies(repo, pip, project, bug_id, bugsinpy_projects_dir, eval
             f.writelines(cleaned)
 
         r = run_cmd(
-                    f"{pip} install --prefer-binary --no-input -r {temp_req} || true",
-                    cwd=cwd
-                )
+            f"{pip} install --prefer-binary --no-input -r {temp_req} || true",
+            cwd=cwd
+        )
 
         logs.append(r.stdout + r.stderr)
 
@@ -115,9 +93,6 @@ def install_dependencies(repo, pip, project, bug_id, bugsinpy_projects_dir, eval
     )
 
     if os.path.exists(bug_req):
-
-        print("Installing bug specific requirements")
-
         safe_install(bug_req)
 
     req_files = [
@@ -132,28 +107,32 @@ def install_dependencies(repo, pip, project, bug_id, bugsinpy_projects_dir, eval
         path = os.path.join(repo, rf)
 
         if os.path.exists(path):
-
-            print(f"Installing {rf}")
-
             safe_install(path, cwd=repo)
 
     if os.path.exists(os.path.join(repo, "setup.py")):
 
-        print("Installing project (setup.py)")
-
-        r = run_cmd(f"{pip} install --no-deps -e . || true", cwd=repo)
-
+        r = run_cmd(f"{pip} install -e . || true", cwd=repo)
         logs.append(r.stdout + r.stderr)
-
+    
+    run_cmd(
+        f"{pip} install pytest pytest-xdist nose mock hypothesis requests numpy pytz python-dateutil cython",
+        cwd=repo
+    )
+    # install TF backend only when needed
+    if project == "keras":
+        run_cmd(
+              f"{pip} install 'tensorflow-cpu==1.15.0' 'h5py<3' 'protobuf<3.21'",
+              cwd=repo
+    )   
+    if project == "pandas":
+        run_cmd(f"{pip} install numpy cython pytz python-dateutil", cwd=repo)
+        run_cmd(f"{args.bug_python} setup.py build_ext --inplace --force", cwd=repo)
+    
     with open(os.path.join(eval_dir, "dependency_install_log.txt"), "w") as f:
 
         for l in logs:
             f.write(l)
 
-
-# ------------------------------------------------------------
-# LLM Output Cleaning
-# ------------------------------------------------------------
 
 def clean_llm_output(raw_output, expected_name):
 
@@ -197,10 +176,6 @@ def clean_llm_output(raw_output, expected_name):
     return "", "AST_PARSE_FAIL"
 
 
-# ------------------------------------------------------------
-# Safe JSON extraction
-# ------------------------------------------------------------
-
 def parse_llm_json(output):
 
     try:
@@ -214,10 +189,6 @@ def parse_llm_json(output):
 
     return None
 
-
-# ------------------------------------------------------------
-# CSV HEADER
-# ------------------------------------------------------------
 
 def ensure_csv_header(path):
 
@@ -236,6 +207,7 @@ def ensure_csv_header(path):
             "run_id",
             "status",
             "passed",
+            "test_file_found",
             "duration_seconds",
             "energy_joules",
             "device",
@@ -251,10 +223,6 @@ def ensure_csv_header(path):
             "platform"
         ])
 
-
-# ------------------------------------------------------------
-# Run Single Bug
-# ------------------------------------------------------------
 
 def run_single(args):
 
@@ -281,39 +249,41 @@ def run_single(args):
 
     url = None
 
-    for line in open(project_info):
+    for line in open(project_info, encoding="utf-8", errors="ignore"):
 
         if line.startswith("github_url"):
             url = line.split("=")[1].strip().strip('"')
 
     repo = os.path.join(eval_dir, project)
 
-    result = run_cmd(f"git clone {url} {repo}")
-    if result.returncode != 0:
-        raise RuntimeError(f"GIT CLONE FAILED")
+    clone = run_cmd(f"git clone {url} {repo}")
+
+    if clone.returncode != 0 or not os.path.exists(repo):
+        raise RuntimeError(f"Git clone failed:\n{clone.stderr}")
 
     bug_info = os.path.join(
         args.bugsinpy_projects_dir, project, "bugs", str(bug_id), "bug.info"
     )
 
     commit = None
+    test_file = None
 
-    for line in open(bug_info):
+    for line in open(bug_info, encoding="utf-8", errors="ignore"):
 
         if "buggy_commit_id" in line:
             commit = line.split("=")[1].strip().strip('"')
 
-    result = run_cmd(f"git checkout {commit}", cwd=repo)
-    if result.returncode != 0:
-        raise RuntimeError(f"GIT CHECKOUT FAILED")
+        if line.startswith("test_file"):
+            test_file = line.split("=")[1].strip().strip('"')
+
+    run_cmd(f"git checkout {commit}", cwd=repo)
 
     venv_path = os.path.join(eval_dir, "venv")
 
     create_virtualenv(venv_path, args.bug_python)
 
     pip = os.path.join(venv_path, "bin", "pip")
-    
-    print("Installing dependencies...", flush=True)
+
     install_dependencies(
         repo,
         pip,
@@ -321,6 +291,7 @@ def run_single(args):
         bug_id,
         args.bugsinpy_projects_dir,
         eval_dir,
+        args.bug_python,
     )
 
     patch_file = os.path.join(
@@ -331,14 +302,17 @@ def run_single(args):
         "bug_patch.txt",
     )
 
-    diff_line = [l for l in open(patch_file) if l.startswith("diff --git")][0]
+    diff_line = [l for l in open(patch_file, encoding="utf-8", errors="ignore") if l.startswith("diff --git")][0]
 
     buggy_rel = re.search(r"a/(.+?) ", diff_line).group(1)
 
     buggy_path = os.path.join(repo, buggy_rel)
 
-    with open(buggy_path) as f:
+    with open(buggy_path, encoding="utf-8", errors="ignore") as f:
         source = f.read()
+
+    with open(os.path.join(eval_dir, "original_buggy_file.py"), "w") as f:
+        f.write(source)
 
     block_info = extract_buggy_block(source, patch_file)
 
@@ -349,17 +323,21 @@ def run_single(args):
         duration = 0
         energy_joules = 0
         test_returncode = -1
+        test_file_found = 0
 
     else:
 
         block_type, block_name, buggy_block = block_info
 
+        with open(os.path.join(eval_dir, "buggy_block.py"), "w") as f:
+            f.write(buggy_block)
+
         prompt = f"""Fix the following {block_type} '{block_name}'.
 
-        Return ONLY corrected code.
-
-        {buggy_block}
-        """
+                Return ONLY corrected code.
+                Do not include explanations.
+                {buggy_block}
+                """
 
         prompt = prompt.replace('"', '\\"')
 
@@ -371,7 +349,6 @@ def run_single(args):
             f"--prompt \"{prompt}\""
         )
 
-        print("Running LLM...", flush=True)
         llm_out = run_cmd(cmd, cwd=eval_dir)
 
         duration = time.time() - start
@@ -387,6 +364,7 @@ def run_single(args):
             passed = 0
             energy_joules = 0
             test_returncode = -1
+            test_file_found = 0
 
         else:
 
@@ -394,61 +372,101 @@ def run_single(args):
 
             raw_output = result_json.get("output", "")
 
+            with open(os.path.join(eval_dir, "llm_generated_code.py"), "w") as f:
+                f.write(raw_output)
+
             cleaned_code, error = clean_llm_output(raw_output, block_name)
+            with open(os.path.join(eval_dir, "cleaned_patch.py"), "w") as f:
+                f.write(cleaned_code)
 
             if error:
 
                 status = f"LLM_STRUCTURE_ERROR_{error}"
                 passed = 0
                 test_returncode = -1
+                test_file_found = 0
 
             else:
 
                 with open(buggy_path, "w") as f:
                     f.write(cleaned_code)
 
+                test_file_found = 0
+
+                if test_file:
+                    test_path = os.path.join(repo, test_file)
+
+                    if os.path.exists(test_path):
+                        test_file_found = 1
+
+                    else:
+                        filename = os.path.basename(test_file)
+
+                        for root, dirs, files in os.walk(repo):
+                            if filename in files:
+                                test_file_found = 1
+                                break
+
                 run_test_script = os.path.abspath(os.path.join(
-                                        args.bugsinpy_projects_dir,
-                                        project,
-                                        "bugs",
-                                        str(bug_id),
-                                        "run_test.sh",
-                                    ))
-                print("Running tests...", flush=True)
-                if os.path.exists(run_test_script):
+                    args.bugsinpy_projects_dir,
+                    project,
+                    "bugs",
+                    str(bug_id),
+                    "run_test.sh",
+                ))
+                
+                activate = f". {venv_path}/bin/activate"
 
-                    result = run_cmd(
-                                f". {venv_path}/bin/activate && PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTEST_ADDOPTS='--assert=plain' bash {run_test_script}",
-                                cwd=repo,
-                            )
+              #  if os.path.exists(run_test_script):
 
-                    # Fallback if pytest collected nothing
-                    if "collected 0 items" in result.stdout or "collected 0 items" in result.stderr:
-                        print("Fallback: running full pytest suite", flush=True)
+               #     cmd = f"{activate} && PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTEST_ADDOPTS='--assert=plain' bash {run_test_script}"
 
-                        result = run_cmd(
-                                        f". {venv_path}/bin/activate && PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -q --maxfail=1",
-                                        cwd=repo,
-                                    )
+                if test_file_found:
+
+                    cmd = f"{activate} && MPLBACKEND=Agg PYTHONPATH={repo}:{repo}/src PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -q -p no:xdist -p no:cacheprovider --maxfail=1 -c /dev/null {test_file}"
 
                 else:
 
-                    result = run_cmd(
-                        f". {venv_path}/bin/activate && PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -q",
-                        cwd=repo,
-                    )
-                # Save test logs
+                    cmd = f"{activate} && MPLBACKEND=Agg PYTHONPATH={repo}:{repo}/src PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -q -p no:xdist  --maxfail=1 -c /dev/null"
+
+                result = run_cmd(cmd, cwd=repo)
+
                 with open(os.path.join(eval_dir, "test_stdout.txt"), "w") as f:
                     f.write(result.stdout)
 
                 with open(os.path.join(eval_dir, "test_stderr.txt"), "w") as f:
                     f.write(result.stderr)
 
-                passed = 1 if result.returncode == 0 else 0
-                status = "LLM_OK_TEST_PASS" if passed else "LLM_OK_TEST_FAIL"
-                if "ModuleNotFoundError" in result.stderr:
-                    status = "TEST_ENV_ERROR"
+                passed = 0
+                status = "UNKNOWN"
+
+                stdout = result.stdout
+                stderr = result.stderr
+                code = result.returncode
+
+                # Dependency / import errors
+                if "ModuleNotFoundError" in stderr or "ImportError" in stderr:
+                    status = "DEPENDENCY_ERROR"
+
+                # No tests collected
+                elif "collected 0 items" in stdout:
+                    status = "NO_TESTS_COLLECTED"
+
+                # Tests passed
+                elif code == 0:
+                    passed = 1
+                    status = "LLM_OK_TEST_PASS"
+
+                # Tests failed
+                elif code == 1:
+                    status = "LLM_OK_TEST_FAIL"
+
+                # Pytest execution error
+                else:
+                    status = "TEST_EXECUTION_ERROR"
+
                 test_returncode = result.returncode
+
     ensure_csv_header(args.results_file)
 
     with open(args.results_file, "a", newline="") as f:
@@ -461,6 +479,7 @@ def run_single(args):
             run_id,
             status,
             passed,
+            test_file_found,
             duration,
             energy_joules,
             "cpu",
@@ -477,44 +496,6 @@ def run_single(args):
         ])
 
     print("→ Done:", status)
-
-
-# ------------------------------------------------------------
-# Run All Selected Bugs
-# ------------------------------------------------------------
-
-def run_all_selected(args):
-
-    with open(args.selected_bugs_file) as f:
-        selected = json.load(f)
-
-    for domain, projects in selected.items():
-
-        print(f"\n=== DOMAIN: {domain} ===")
-
-        for project, bugs in projects.items():
-
-            for bug in bugs:
-
-                single_args = argparse.Namespace(
-                    project=project,
-                    bug=bug,
-                    model=args.model,
-                    run_id=args.run_id,
-                    bug_python=args.bug_python,
-                    llm_python=args.llm_python,
-                    bugsinpy_projects_dir=args.bugsinpy_projects_dir,
-                    eval_root=args.eval_root,
-                    results_file=args.results_file,
-                )
-
-                try:
-                    run_single(single_args)
-
-                except Exception as e:
-
-                    print(f"ERROR running {project} bug {bug}: {e}")
-
 
 # ------------------------------------------------------------
 # Main
@@ -542,8 +523,36 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.all_selected:
-        run_all_selected(args)
+
+        with open(args.selected_bugs_file) as f:
+            selected = json.load(f)
+
+        for domain, projects in selected.items():
+
+            for project, bugs in projects.items():
+
+                for bug in bugs:
+
+                    single_args = argparse.Namespace(
+                        project=project,
+                        bug=bug,
+                        model=args.model,
+                        run_id=args.run_id,
+                        bug_python=args.bug_python,
+                        llm_python=args.llm_python,
+                        bugsinpy_projects_dir=args.bugsinpy_projects_dir,
+                        eval_root=args.eval_root,
+                        results_file=args.results_file,
+                    )
+
+                    try:
+                        run_single(single_args)
+
+                    except Exception as e:
+                        print(f"ERROR running {project} bug {bug}: {e}")
+
     else:
+
         if args.project is None or args.bug is None:
             print("ERROR: For single run you must provide --project and --bug")
             sys.exit(1)
