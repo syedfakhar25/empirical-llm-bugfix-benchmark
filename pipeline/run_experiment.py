@@ -416,7 +416,46 @@ def classify_pytest_result(result, tests_ran):
         return "PASS", "NONE", passed
 
     return "FAIL", "TEST_ASSERTION_FAIL", passed
+# ------------------------------------------------
+# multi-run wrapper
+# ------------------------------------------------
+def run_multi(args):
+    runs = args.runs
+    sleep_time = args.sleep
 
+    for i in range(runs):
+        print(f"\n===== RUN {i+1}/{runs} =====")
+
+        args.run_id = i + 1
+        run_single(args)
+
+        if i < runs - 1:
+            print(f"Sleeping {sleep_time}s...\n")
+            time.sleep(sleep_time)
+
+# ------------------------------------------------
+# run all selected bugs
+# ------------------------------------------------
+def run_all_selected(args):
+    if not args.selected_bugs_file:
+        raise ValueError("selected_bugs_file required for --mode all_selected")
+
+    with open(args.selected_bugs_file) as f:
+        selected = json.load(f)
+
+    for entry in selected:
+        project = entry["project"]
+        bug_id = entry["bug_id"]
+
+        args.project = project
+        args.bug = bug_id
+
+        print(f"\n### {project} Bug {bug_id} ###")
+
+        if args.mode == "multi_run":
+            run_multi(args)
+        else:
+            run_single(args)
 
 # ------------------------------------------------
 # MAIN RUN
@@ -771,7 +810,7 @@ if __name__ == "__main__":
     parser.add_argument("--project")
     parser.add_argument("--bug", type=int)
     parser.add_argument("--model", required=True)
-    parser.add_argument("--run_id", type=int, required=True)
+    parser.add_argument("--run_id", type=int, default=1)
 
     parser.add_argument("--bug-python", required=True)
     parser.add_argument("--llm-python", default=sys.executable)
@@ -780,5 +819,23 @@ if __name__ == "__main__":
     parser.add_argument("--eval_root", default=PIPE)
     parser.add_argument("--results_file", default=RESULTS_FILE)
 
+    # NEW FLAGS
+    parser.add_argument("--mode", choices=["single", "all_selected", "multi_run"], default="single")
+    parser.add_argument("--runs", type=int, default=1)
+    parser.add_argument("--sleep", type=int, default=5)
+    parser.add_argument("--selected_bugs_file")
+
     args = parser.parse_args()
-    run_single(args)
+
+    if args.mode == "single":
+        if not args.project or args.bug is None:
+            raise ValueError("project and bug required for single mode")
+        run_single(args)
+
+    elif args.mode == "multi_run":
+        if not args.project or args.bug is None:
+            raise ValueError("project and bug required for multi_run mode")
+        run_multi(args)
+
+    elif args.mode == "all_selected":
+        run_all_selected(args)
