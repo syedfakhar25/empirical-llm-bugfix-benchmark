@@ -124,7 +124,7 @@ def main():
     parser.add_argument("--model", required=True)
     parser.add_argument("--prompt")
     parser.add_argument("--prompt_file")
-    parser.add_argument("--max_new_tokens", type=int, default=384)
+    parser.add_argument("--max_new_tokens", type=int, default=800)
     parser.add_argument("--device", default="auto")
 
     args = parser.parse_args()
