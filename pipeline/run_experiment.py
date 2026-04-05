@@ -631,7 +631,13 @@ FIXED CODE:
     start = time.time()
     llm_out = run_cmd(cmd, cwd=eval_dir)
     duration = time.time() - start
-
+    
+    # DEBUG: print stderr if exists
+    if llm_out.stderr.strip():
+        print("\n[LLM STDERR START]")
+        print(llm_out.stderr[:2000])  # limit so output explode na ho
+        print("[LLM STDERR END]\n")
+        
     with open(os.path.join(eval_dir, "llm_raw_output.txt"), "w") as f:
         f.write(llm_out.stdout)
     with open(os.path.join(eval_dir, "llm_stderr.txt"), "w") as f:
@@ -799,6 +805,13 @@ FIXED CODE:
         f"Full: {full_test_pass}/{full_total} | "
         f"Energy: {llm_energy:.2f}J | Tokens: {tokens_generated}"
     )
+    # -------------------------
+    # CLEANUP
+    # -------------------------
+    try:
+        shutil.rmtree(eval_dir)
+    except Exception:
+        pass
 
 
 # ------------------------------------------------
