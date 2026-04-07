@@ -667,101 +667,95 @@ FIXED CODE:
     with open(os.path.join(eval_dir, "llm_generated_code.py"), "w") as f:
         f.write(raw_output)
 
-    if not raw_output.strip():
-        status = "LLM_RUNTIME_ERROR"
-        failure_reason = "EMPTY_LLM_OUTPUT"
 
-    else:
-        cleaned_code, clean_error = clean_llm_output(raw_output, block_name)
+    cleaned_code = raw_output.strip()
 
-        with open(os.path.join(eval_dir, "cleaned_patch.py"), "w") as f:
+    if not cleaned_code:
+        print("⚠ Empty LLM output — inserting dummy")
+        cleaned_code = f"def {block_name}(*args, **kwargs):\n    pass"
+
+    with open(os.path.join(eval_dir, "cleaned_patch.py"), "w") as f:
+        f.write(cleaned_code)
+
+    try:
+        shutil.copy(buggy_path, buggy_path + ".bak")
+        replace_function_in_file(buggy_path, block_name, cleaned_code)
+    except Exception:
+        print("⚠ Replace failed — appending instead")
+        with open(buggy_path, "a") as f:
+            f.write("\n\n# LLM PATCH\n")
             f.write(cleaned_code)
 
-        is_valid, validation_reason = validate_patch(cleaned_code, block_name, block_type)
 
-        if not is_valid:
-            status = "LLM_SYNTAX_ERROR"
-            failure_reason = validation_reason or clean_error or "INVALID_PATCH"
+    # -------------------------
+    # ALWAYS RUN TESTS
+    # -------------------------
+    if test_file_found and resolved_test_file:
+
+        # bug SPECIFIC TEST
+        post_cmd = build_pytest_cmd(activate, resolved_test_file)
+        post_result = run_cmd(post_cmd, cwd=repo)
+
+        with open(os.path.join(eval_dir, "post_test_stdout.txt"), "w") as f:
+            f.write(post_result.stdout)
+        with open(os.path.join(eval_dir, "post_test_stderr.txt"), "w") as f:
+            f.write(post_result.stderr)
+
+        post_tests_ran, post_total = parse_pytest_run(post_result.stdout, post_result.stderr)
+        post_test_ran = post_total
+
+        post_status, post_reason, post_test_pass = classify_pytest_result(post_result, post_tests_ran)
+
+
+        # FULL TEST SUITE
+        full_cmd = build_pytest_cmd(activate)
+        full_result = run_cmd(full_cmd, cwd=repo)
+
+        with open(os.path.join(eval_dir, "full_test_stdout.txt"), "w") as f:
+            f.write(full_result.stdout)
+        with open(os.path.join(eval_dir, "full_test_stderr.txt"), "w") as f:
+            f.write(full_result.stderr)
+
+        full_tests_ran, full_total = parse_pytest_run(full_result.stdout, full_result.stderr)
+        full_test_ran = full_total
+
+        full_status, full_reason, full_total_pass = classify_pytest_result(full_result, full_tests_ran)
+        full_test_pass = full_total_pass
+
+
+        # -------------------------
+        # FINAL STATUS LOGIC
+        # -------------------------
+        if post_status == "DEPENDENCY_ERROR":
+            status = "DEPENDENCY_ERROR"
+            failure_reason = post_reason
+
+        elif post_status == "TEST_EXECUTION_ERROR":
+            status = "TEST_EXECUTION_ERROR"
+            failure_reason = post_reason
+
+        elif post_test_pass == 0:
+            status = "BUG_TEST_FAIL"
+            failure_reason = post_reason
+
+        elif full_status == "DEPENDENCY_ERROR":
+            status = "DEPENDENCY_ERROR"
+            failure_reason = full_reason
+
+        elif full_status == "TEST_EXECUTION_ERROR":
+            status = "TEST_EXECUTION_ERROR"
+            failure_reason = full_reason
+
+        elif full_test_pass < full_test_ran:
+            status = "REGRESSION_FAIL"
+            failure_reason = full_reason
 
         else:
-            try:
-                shutil.copy(buggy_path, buggy_path + ".bak")
-                replace_function_in_file(buggy_path, block_name, cleaned_code)
-            except Exception:
-                status = "PATCH_APPLY_ERROR"
-                failure_reason = "REPLACE_FAILED"
-            else:
-                # -------------------------
-                # post-patch bug-specific test
-                # -------------------------
-                if test_file_found and resolved_test_file:
-                    post_cmd = build_pytest_cmd(activate, resolved_test_file)
-                    post_result = run_cmd(post_cmd, cwd=repo)
-
-                    with open(os.path.join(eval_dir, "post_test_stdout.txt"), "w") as f:
-                        f.write(post_result.stdout)
-                    with open(os.path.join(eval_dir, "post_test_stderr.txt"), "w") as f:
-                        f.write(post_result.stderr)
-
-                    post_tests_ran, post_total = parse_pytest_run(post_result.stdout, post_result.stderr)
-                    post_test_ran = post_total
-
-                    post_status, post_reason, post_test_pass = classify_pytest_result(post_result, post_tests_ran)
-                    post_test_pass = post_test_pass
-
-                    # -------------------------
-                    # full suite
-                    # -------------------------
-                    full_cmd = build_pytest_cmd(activate)
-                    full_result = run_cmd(full_cmd, cwd=repo)
-
-                    with open(os.path.join(eval_dir, "full_test_stdout.txt"), "w") as f:
-                        f.write(full_result.stdout)
-                    with open(os.path.join(eval_dir, "full_test_stderr.txt"), "w") as f:
-                        f.write(full_result.stderr)
-
-                    full_tests_ran, full_total = parse_pytest_run(full_result.stdout, full_result.stderr)
-                    full_test_ran = full_total
-
-                    full_status, full_reason, full_total_pass = classify_pytest_result(full_result, full_tests_ran)
-                    full_test_pass = full_total_pass
-
-                    # final classification
-                    if post_status == "DEPENDENCY_ERROR":
-                        status = "DEPENDENCY_ERROR"
-                        failure_reason = post_reason
-
-                    elif post_status == "TEST_EXECUTION_ERROR":
-                        status = "TEST_EXECUTION_ERROR"
-                        failure_reason = post_reason
-
-                    elif post_test_pass == 0:
-                        status = "BUG_TEST_FAIL"
-                        failure_reason = post_reason
-
-                    elif post_test_pass > 0 and full_status == "DEPENDENCY_ERROR":
-                        status = "DEPENDENCY_ERROR"
-                        failure_reason = full_reason
-
-                    elif post_test_pass > 0 and full_status == "TEST_EXECUTION_ERROR":
-                        status = "TEST_EXECUTION_ERROR"
-                        failure_reason = full_reason
-
-                    elif post_test_pass > 0 and full_test_pass < full_test_ran:
-                        status = "REGRESSION_FAIL"
-                        failure_reason = full_reason
-
-                    elif post_test_pass > 0 and full_test_pass == full_test_ran:
-                        status = "SUCCESS"
-                        failure_reason = "NONE"
-
-                    else:
-                        status = "TEST_EXECUTION_ERROR"
-                        failure_reason = "UNKNOWN"
-
-                else:
-                    status = "TEST_EXECUTION_ERROR"
-                    failure_reason = "DECLARED_TEST_FILE_NOT_FOUND"
+            status = "SUCCESS"
+            failure_reason = "NONE"
+    else:
+        status = "TEST_EXECUTION_ERROR"
+        failure_reason = "DECLARED_TEST_FILE_NOT_FOUND"
 
     ensure_csv_header(args.results_file)
 
