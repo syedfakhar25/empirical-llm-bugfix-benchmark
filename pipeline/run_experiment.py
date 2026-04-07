@@ -273,17 +273,40 @@ def validate_patch(cleaned_code, block_name, block_type):
 # replace function/class in file
 # ------------------------------------------------
 def replace_function_in_file(file_path, block_name, new_code):
+    import ast
+
     with open(file_path, encoding="utf-8", errors="ignore") as f:
-        text = f.read()
+        source = f.read()
 
-    pattern = rf"(?ms)^((?:async\s+def|def|class)\s+{re.escape(block_name)}\b.*?)(?=^(?:async\s+def|def|class)\s+\w+\b|\Z)"
-    new_text, count = re.subn(pattern, new_code.rstrip() + "\n\n", text)
+    tree = ast.parse(source)
 
-    if count == 0:
-        raise RuntimeError(f"Could not replace block '{block_name}' in file {file_path}")
+    target_node = None
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name == block_name:
+                target_node = node
+                break
+
+    if target_node is None:
+        raise RuntimeError(f"Block '{block_name}' not found")
+
+    # get exact lines
+    lines = source.splitlines()
+
+    start = target_node.lineno - 1
+    end = target_node.end_lineno
+
+    # preserve indentation
+    indent = len(lines[start]) - len(lines[start].lstrip())
+
+    new_lines = new_code.splitlines()
+    new_lines = [(" " * indent) + line if line.strip() else line for line in new_lines]
+
+    updated = lines[:start] + new_lines + lines[end:]
 
     with open(file_path, "w", encoding="utf-8") as f:
-        f.write(new_text)
+        f.write("\n".join(updated))
 
 
 # ------------------------------------------------
@@ -680,8 +703,12 @@ FIXED CODE:
     try:
         shutil.copy(buggy_path, buggy_path + ".bak")
         replace_function_in_file(buggy_path, block_name, cleaned_code)
-    except Exception:
-        print("⚠ Replace failed — appending instead")
+    except Exception as e:
+        print("Replace failed — stopping run")
+        print(str(e))
+        status = "SETUP_ERROR"
+        failure_reason = "PATCH_INSERTION_FAILED"
+        return
         with open(buggy_path, "a") as f:
             f.write("\n\n# LLM PATCH\n")
             f.write(cleaned_code)
