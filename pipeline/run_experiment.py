@@ -475,7 +475,7 @@ def run_all_selected(args):
 
         print(f"\n### {project} Bug {bug_id} ###")
 
-        if args.mode == "multi_run":
+        if args.runs > 1:
             run_multi(args)
         else:
             run_single(args)
