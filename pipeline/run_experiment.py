@@ -687,9 +687,16 @@ FIXED CODE:
     else:
         raw_output = llm_out.stdout.strip()
 
-    with open(os.path.join(eval_dir, "llm_generated_code.py"), "w") as f:
-        f.write(raw_output)
+    # -------------------------
+    # SAVE LLM OUTPUT
+    # -------------------------
+    output_dir = os.path.join(args.eval_root, "llm_outputs")
+    os.makedirs(output_dir, exist_ok=True)
 
+    model_clean = model.replace("/", "_")
+
+    filename = f"{project}_{bug_id}_{model_clean}_run{run_id}.py"
+    output_path = os.path.join(output_dir, filename)
 
     cleaned_code = raw_output.strip()
 
@@ -697,7 +704,11 @@ FIXED CODE:
         print("⚠ Empty LLM output — inserting dummy")
         cleaned_code = f"def {block_name}(*args, **kwargs):\n    pass"
 
-    with open(os.path.join(eval_dir, "cleaned_patch.py"), "w") as f:
+    with open(output_path, "w") as f:
+        f.write(f"# Project: {project}\n")
+        f.write(f"# Bug: {bug_id}\n")
+        f.write(f"# Model: {model}\n")
+        f.write(f"# Run: {run_id}\n\n")
         f.write(cleaned_code)
 
     try:
