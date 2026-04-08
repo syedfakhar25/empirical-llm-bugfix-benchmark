@@ -449,7 +449,7 @@ def run_multi(args):
     for i in range(runs):
         print(f"\n===== RUN {i+1}/{runs} =====")
 
-        args.run_id = i + 1
+        args.run_id = f"{args.bug}_{i+1}"
         run_single(args)
 
         if i < runs - 1:
@@ -460,25 +460,31 @@ def run_multi(args):
 # run all selected bugs
 # ------------------------------------------------
 def run_all_selected(args):
+    ALL_MODELS = [
+        "Qwen/Qwen2.5-Coder-1.5B",
+        "stabilityai/stablecode-3b",
+    ]
     if not args.selected_bugs_file:
         raise ValueError("selected_bugs_file required for --mode all_selected")
 
     with open(args.selected_bugs_file) as f:
         selected = json.load(f)
+    for model in ALL_MODELS:
+        print(f"\n\n######## MODEL: {model} ########")
+        args.model = model
+        for entry in selected:
+            project = entry["project"]
+            bug_id = entry["bug_id"]
 
-    for entry in selected:
-        project = entry["project"]
-        bug_id = entry["bug_id"]
+            args.project = project
+            args.bug = bug_id
 
-        args.project = project
-        args.bug = bug_id
+            print(f"\n### {project} Bug {bug_id} ###")
 
-        print(f"\n### {project} Bug {bug_id} ###")
-
-        if args.runs > 1:
-            run_multi(args)
-        else:
-            run_single(args)
+            if args.runs > 1:
+                run_multi(args)
+            else:
+                run_single(args)
 
 # ------------------------------------------------
 # MAIN RUN
@@ -854,7 +860,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--project")
     parser.add_argument("--bug", type=int)
-    parser.add_argument("--model", required=True)
+    parser.add_argument("--model")
     parser.add_argument("--run_id", type=int, default=1)
 
     parser.add_argument("--bug-python", required=True)
