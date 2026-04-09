@@ -461,8 +461,10 @@ def run_multi(args):
 # ------------------------------------------------
 def run_all_selected(args):
     ALL_MODELS = [
-        "Qwen/Qwen2.5-Coder-1.5B",
-        "stabilityai/stablecode-3b",
+        "bigcode/starcoder2-7b",
+        "deepseek-ai/deepseek-coder-6.7b-instruct",
+        "codellama/CodeLlama-13b-Instruct-hf",
+        "bigcode/starcoder2-15b"
     ]
     if not args.selected_bugs_file:
         raise ValueError("selected_bugs_file required for --mode all_selected")
